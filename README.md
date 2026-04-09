@@ -4080,7 +4080,8 @@ const PveAuth = (() => {
   const WALLET_KEY   = 'pve-wallet-v1';
   const PROJECT_ID   = 'f914ed3c80a27cd3c8f0217ba6ddb0fe';
   let _profile       = null;
-  let _onLoginCb     = null;
+  let _onLoginCb     = null;   // used by requireLogin() promise
+  let _onLoginListeners = [];  // persistent switch listeners
   let _modal         = null;
   let _wagmiConfig   = null;
 
@@ -4190,6 +4191,7 @@ const PveAuth = (() => {
     _updateNavUser();
     _dismissModal();
     if (_onLoginCb) { _onLoginCb(_profile); _onLoginCb = null; }
+    _onLoginListeners.forEach(fn => { try { fn(_profile); } catch(e) {} });
   }
 
   // ── Modal UI ─────────────────────────────────────────────────
@@ -4318,7 +4320,7 @@ const PveAuth = (() => {
 
   function logout() { _profile = null; _save(null); if (_modal) _modal.disconnect().catch(()=>{}); }
 
-  function onLogin(fn) { _onLoginCb = fn; }
+  function onLogin(fn) { _onLoginListeners.push(fn); }
 
   async function requireLogin() {
     if (_profile && (_profile.uid || _profile.address)) return _profile;
@@ -4397,12 +4399,14 @@ window.PveStorage = PveStorage;
 // without a full page reload. Resets identity and loads the new
 // wallet's save data so XP / wave data goes to the right account.
 PveAuth.onLogin(async (profile) => {
-  const newAddr = (profile.address || profile.uid || '').toLowerCase();
+  const newAddr = (profile.address || '').toLowerCase();
   if (!newAddr) return;
 
   // If it's the same wallet that just re-authenticated, do nothing
-  const currentAddr = (shopState.walletAddress || '').toLowerCase();
-  if (newAddr === currentAddr) return;
+  const prevProfile = PveAuth.getProfile();
+  const currentAddr = (shopState.walletAddress || prevProfile?.address || '').toLowerCase();
+  // Only skip if addresses genuinely match AND we already have data loaded
+  if (newAddr === currentAddr && state.totalXP > 0) return;
 
   showSaveToast('🔄 Wallet switched — loading save...', '#c9a84c');
 
@@ -4424,6 +4428,24 @@ PveAuth.onLogin(async (profile) => {
   potionState.poison.owned = false; potionState.poison.activeThisFight = false;
   potionState.miss.owned   = false; potionState.miss.activeThisFight   = false;
   guildState.myGuildCode = null; guildState.myGuildName = null; guildState.isLeader = false;
+
+  // Reset DOM name displays immediately so old wallet's name doesn't persist
+  const combatantNameEl = document.querySelector('.combatant-name');
+  if (combatantNameEl) combatantNameEl.textContent = 'THE WARRIOR';
+  const heroNameInput = document.getElementById('hero-name-input');
+  if (heroNameInput) heroNameInput.value = '';
+  const nameCostLabel = document.getElementById('name-cost-label');
+  if (nameCostLabel) nameCostLabel.textContent = 'Free first name';
+  // Reset wave/enemy count DOM
+  const waveNumEl = document.getElementById('wave-num');
+  if (waveNumEl) waveNumEl.textContent = '1';
+  const enemyCountEl = document.getElementById('enemy-count');
+  if (enemyCountEl) enemyCountEl.textContent = '0';
+  const fightBtn = document.getElementById('btn-fight');
+  if (fightBtn) fightBtn.textContent = '⚔ ENTER THE ARENA';
+  // Reset player sprite to default
+  const playerSprite = document.getElementById('player-sprite');
+  if (playerSprite) playerSprite.textContent = '🧙';
 
   // Install PveStorage under new wallet address
   const newStorageKey = (profile.address || '').toLowerCase() || profile.uid || '';
