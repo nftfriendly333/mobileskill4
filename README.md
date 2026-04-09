@@ -1,3 +1,4 @@
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -3578,7 +3579,7 @@ const SAVE_KEY = 'ironArena_v1'; // legacy fallback key
 
 async function _arenaStorageKey() {
   const p = PveAuth.getProfile();
-  return p ? 'arena-save:' + p.address : null;
+  return p ? 'arena-save:' + (p.address || '').toLowerCase() : null;
 }
 
 async function saveGame() {
@@ -4173,20 +4174,19 @@ const PveAuth = (() => {
   async function _handleAddress(rawAddr) {
     const existing = _load();
     const addr = rawAddr.toLowerCase();
+    // Always use wallet address as the stable uid — never a random/timestamp key
+    const stableUid = 'w_' + addr.slice(2); // e.g. w_abcdef1234...
     // If returning wallet, restore profile — otherwise create new
     if (existing && existing.address && existing.address.toLowerCase() === addr) {
       _profile = existing;
+      _profile.uid = stableUid; // upgrade any old random uid to stable one
     } else {
-      const uid = 'w_' + addr.slice(2, 10) + Date.now().toString(36);
-      _profile = { uid, address: rawAddr, displayName: _shortAddr(rawAddr), skin: '⚔' };
-      // Preserve displayName/skin if user had previously set them on this address
-      if (existing && existing.address && existing.address.toLowerCase() === addr) {
-        _profile.displayName = existing.displayName || _profile.displayName;
-        _profile.skin = existing.skin || _profile.skin;
-      }
+      _profile = { uid: stableUid, address: rawAddr, displayName: _shortAddr(rawAddr), skin: '⚔' };
     }
     _save(_profile);
-    if (typeof PveStorage !== 'undefined') PveStorage.install(_profile.uid || _profile.address);
+    // Always key storage to wallet address for cross-session stability
+    const storageKey = _profile.address ? _profile.address.toLowerCase() : (_profile.uid || '');
+    if (typeof PveStorage !== 'undefined') PveStorage.install(storageKey);
     _updateNavUser();
     _dismissModal();
     if (_onLoginCb) { _onLoginCb(_profile); _onLoginCb = null; }
@@ -4301,7 +4301,8 @@ const PveAuth = (() => {
     // Start booting Web3Modal in background immediately
     _bootModal();
     if (_profile && (_profile.address || _profile.uid)) {
-      if (typeof PveStorage !== 'undefined') PveStorage.install(_profile.uid || _profile.address);
+      const storageKey = _profile.address ? _profile.address.toLowerCase() : (_profile.uid || '');
+      if (typeof PveStorage !== 'undefined') PveStorage.install(storageKey);
     }
     _updateNavUser();
     return _profile;
@@ -4424,8 +4425,9 @@ PveAuth.onLogin(async (profile) => {
   potionState.miss.owned   = false; potionState.miss.activeThisFight   = false;
   guildState.myGuildCode = null; guildState.myGuildName = null; guildState.isLeader = false;
 
-  // Install PveStorage under new address
-  if (typeof PveStorage !== 'undefined') PveStorage.install(profile.uid || profile.address);
+  // Install PveStorage under new wallet address
+  const newStorageKey = (profile.address || '').toLowerCase() || profile.uid || '';
+  if (typeof PveStorage !== 'undefined') PveStorage.install(newStorageKey);
 
   // Load new wallet's cloud save
   const loaded = await loadGame().catch(() => false);
