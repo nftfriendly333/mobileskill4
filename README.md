@@ -3597,7 +3597,9 @@ async function saveGame() {
     }
   };
   try {
+    console.log('[Iron Arena] saveGame: writing to', key);
     await window.storage.set(key, JSON.stringify(data), false);
+    console.log('[Iron Arena] saveGame: success');
     showSaveToast('✔ Progress saved!', '#27ae60');
     submitLeaderboardScore();
   } catch(e) {
@@ -3608,9 +3610,17 @@ async function saveGame() {
 async function loadGame() {
   try {
     const key = await _arenaStorageKey();
-    if (!key || !window.storage) return false;
+    if (!key || !window.storage) {
+      console.warn('[Iron Arena] loadGame: no key or storage — wallet connected?', { key, storage: !!window.storage });
+      return false;
+    }
+    console.log('[Iron Arena] loadGame: fetching', key);
     const r = await window.storage.get(key, false);
-    if (!r) return false;
+    if (!r) {
+      console.log('[Iron Arena] loadGame: no save found for this wallet (fresh start)');
+      return false;
+    }
+    console.log('[Iron Arena] loadGame: save found, restoring...');
     const data = JSON.parse(r.value);
 
     // Restore state
@@ -4346,9 +4356,22 @@ window.PveStorage = PveStorage;
 
     // Set uid from profile
     if (profile.uid || profile.address) {
-      shopState.walletAddress = profile.uid || profile.address || "";
+      shopState.walletAddress = profile.address || profile.uid || '';
+      // Explicitly install storage under wallet address BEFORE loading save
+      const storageKey = (profile.address || '').toLowerCase() || profile.uid || '';
+      if (typeof PveStorage !== 'undefined' && storageKey) PveStorage.install(storageKey);
       renderWalletDisplay();
       updateFightButtonWalletGate();
+    }
+
+    // Wait for Firebase to be ready before loading save
+    if (!window._fbReady) {
+      await new Promise(resolve => {
+        const check = setInterval(() => {
+          if (window._fbReady) { clearInterval(check); resolve(); }
+        }, 100);
+        setTimeout(() => { clearInterval(check); resolve(); }, 5000); // max 5s wait
+      });
     }
 
     // Load cloud save — overrides local defaults if save exists
