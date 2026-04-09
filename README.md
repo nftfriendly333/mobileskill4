@@ -1,4 +1,3 @@
-<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -4056,177 +4055,117 @@ const PveStorage2 = PveStorage; // alias suppress re-declaration
 
 
 // ═══════════════════════════════════════════════════════════════
-// PvE SHARED WALLET AUTH v2 — Web3Modal
-// One connect gives access to all apps via localStorage key
+// PvE WALLET AUTH v3 — Zero dependency, direct window.ethereum
+// No CDN imports. No ad-blocker issues. MetaMask / any EIP-1193
+// wallet works. Falls back gracefully if no wallet installed.
 //   pve-wallet-v1  →  { address, displayName, skin, uid }
 // ═══════════════════════════════════════════════════════════════
 const PveAuth = (() => {
-  const WALLET_KEY   = 'pve-wallet-v1';
-  const PROJECT_ID   = 'f914ed3c80a27cd3c8f0217ba6ddb0fe';
-  let _profile       = null;
-  let _onLoginCb     = null;   // used by requireLogin() promise
-  let _onLoginListeners = [];  // persistent switch listeners
-  let _modal         = null;
-  let _wagmiConfig   = null;
+  const WALLET_KEY      = 'pve-wallet-v1';
+  let _profile          = null;
+  let _onLoginCb        = null;
+  let _onLoginListeners = [];
 
-  function _shortAddr(addr) {
-    return addr ? addr.slice(0,6) + '…' + addr.slice(-4) : 'Wallet';
-  }
-  function _load() {
-    try { return JSON.parse(localStorage.getItem(WALLET_KEY)); } catch { return null; }
-  }
-  function _save(p) {
-    if (!p) { localStorage.removeItem(WALLET_KEY); return; }
-    localStorage.setItem(WALLET_KEY, JSON.stringify(p));
-  }
+  function _shortAddr(a) { return a ? a.slice(0,6)+'…'+a.slice(-4) : 'Wallet'; }
+  function _load()  { try { return JSON.parse(localStorage.getItem(WALLET_KEY)); } catch { return null; } }
+  function _save(p) { p ? localStorage.setItem(WALLET_KEY, JSON.stringify(p)) : localStorage.removeItem(WALLET_KEY); }
 
-  // ── Boot Web3Modal (ESM, async) ───────────────────────────────
-  async function _bootModal() {
-    if (_modal) return;
-    try {
-      const [w3m, wagmiChains, wagmiCore] = await Promise.all([
-        import('https://esm.sh/@web3modal/wagmi@5'),
-        import('https://esm.sh/wagmi@2/chains'),
-        import('https://esm.sh/@wagmi/core@2'),
-      ]);
-      const { createWeb3Modal, defaultWagmiConfig } = w3m;
-      const { mainnet, optimism, base, polygon, arbitrum, bsc, avalanche, optimismSepolia, sepolia } = wagmiChains;
-      const { reconnect, getAccount } = wagmiCore;
-
-      const chains = [optimism, mainnet, base, polygon, arbitrum, bsc, avalanche, optimismSepolia, sepolia];
-      _wagmiConfig = defaultWagmiConfig({
-        chains,
-        projectId: PROJECT_ID,
-        metadata: { name: 'PvE Hub', description: '$PvE Ecosystem', url: window.location.origin, icons: [] }
-      });
-      reconnect(_wagmiConfig);
-      _modal = createWeb3Modal({
-        wagmiConfig: _wagmiConfig,
-        projectId: PROJECT_ID,
-        chains,
-        themeMode: 'dark',
-        themeVariables: {
-          '--w3m-color-mix': '#c8a96e',
-          '--w3m-color-mix-strength': 20,
-          '--w3m-accent': '#c8a96e',
-          '--w3m-border-radius-master': '4px',
-          '--w3m-font-family': "'DM Mono', monospace"
-        },
-        featuredWalletIds: [
-          'c57ca95b47569778a828d19178114f4db188b89b763c899ba0be274e97267d96',
-          'fd20dc426fb37566d803205b19bbc1d4096b248ac04548e3cfb6b3a38bd033aa',
-          '1ae92b26df02f0abca6304df07debccd18262fdf5fe82daa81593582dac9a369',
-          '4622a2b2d6af1c9844944291e5e7351a6aa24cd7b23099efac1b2fd875da31a0'
-        ]
-      });
-
-      // Listen for connect success
-      let _disconnectTimer = null;
-      _modal.subscribeEvents(async (event) => {
-        if (event.data.event === 'CONNECT_SUCCESS') {
-          // Cancel any pending disconnect — this is a switch, not a real logout
-          if (_disconnectTimer) { clearTimeout(_disconnectTimer); _disconnectTimer = null; }
-          await _pollAccount(getAccount);
-        }
-        if (event.data.event === 'DISCONNECT_SUCCESS') {
-          // Delay wipe — if CONNECT_SUCCESS fires within 3s it's a wallet switch not a logout
-          _disconnectTimer = setTimeout(() => {
-            _disconnectTimer = null;
-            const acct = getAccount(_wagmiConfig);
-            if (!acct?.address) { _profile = null; _save(null); _updateNavUser(); }
-          }, 3000);
-        }
-      });
-
-      // Check if already connected after reconnect
-      const acct = getAccount(_wagmiConfig);
-      if (acct?.address) await _handleAddress(acct.address);
-
-      window._pveWagmiConfig = _wagmiConfig;
-      window._pveModal = _modal;
-    } catch(e) {
-      console.error('PveAuth: Web3Modal boot failed', e);
-    }
-  }
-
-  async function _pollAccount(getAccount) {
-    let tries = 0;
-    return new Promise(resolve => {
-      const iv = setInterval(async () => {
-        const acct = getAccount(_wagmiConfig);
-        if (acct?.address) {
-          clearInterval(iv);
-          await _handleAddress(acct.address);
-          resolve();
-        }
-        if (++tries > 20) { clearInterval(iv); resolve(); }
-      }, 500);
-    });
-  }
+  function _eth() { return window.ethereum || null; }
 
   async function _handleAddress(rawAddr) {
+    if (!rawAddr) return;
+    const addr     = rawAddr.toLowerCase();
     const existing = _load();
-    const addr = rawAddr.toLowerCase();
-    // Always use wallet address as the stable uid — never a random/timestamp key
-    const stableUid = 'w_' + addr.slice(2); // e.g. w_abcdef1234...
-    // If returning wallet, restore profile — otherwise create new
+    const stableUid = 'w_' + addr.slice(2);
     if (existing && existing.address && existing.address.toLowerCase() === addr) {
       _profile = existing;
-      _profile.uid = stableUid; // upgrade any old random uid to stable one
+      _profile.uid = stableUid;
     } else {
       _profile = { uid: stableUid, address: rawAddr, displayName: _shortAddr(rawAddr), skin: '⚔' };
     }
     _save(_profile);
-    // Always key storage to wallet address for cross-session stability
-    const storageKey = _profile.address ? _profile.address.toLowerCase() : (_profile.uid || '');
+    const storageKey = addr;
     if (typeof PveStorage !== 'undefined') PveStorage.install(storageKey);
     _updateNavUser();
     _dismissModal();
     if (_onLoginCb) { _onLoginCb(_profile); _onLoginCb = null; }
-    _onLoginListeners.forEach(fn => { try { fn(_profile); } catch(e) {} });
+    _onLoginListeners.forEach(fn => { try { fn(_profile); } catch(e){} });
   }
 
-  // ── Modal UI ─────────────────────────────────────────────────
+  // Listen for wallet account changes (user switches in MetaMask extension)
+  function _listenAccountChanges() {
+    const eth = _eth();
+    if (!eth) return;
+    eth.on('accountsChanged', async (accounts) => {
+      if (accounts && accounts[0]) {
+        await _handleAddress(accounts[0]);
+      } else {
+        // User disconnected all accounts
+        _profile = null; _save(null); _updateNavUser();
+        location.reload();
+      }
+    });
+  }
+
+  // ── Connect flow ──────────────────────────────────────────────
+  async function _connect() {
+    const errEl = document.getElementById('a-err');
+    const btnEl = document.getElementById('a-btn');
+    const eth = _eth();
+
+    if (!eth) {
+      // No wallet detected — show install link
+      if (errEl) errEl.innerHTML = 'No wallet detected. <a href="https://metamask.io/download/" target="_blank" style="color:#c8a96e">Install MetaMask</a> or use a wallet browser.';
+      return;
+    }
+
+    try {
+      if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Connecting…'; }
+      if (errEl) errEl.textContent = '';
+      const accounts = await eth.request({ method: 'eth_requestAccounts' });
+      if (accounts && accounts[0]) {
+        await _handleAddress(accounts[0]);
+      }
+    } catch(e) {
+      const msg = e.code === 4001 ? 'Connection cancelled.' : 'Connection failed. Try again.';
+      if (errEl) errEl.textContent = msg;
+      if (btnEl) { btnEl.disabled = false; btnEl.textContent = '⬡ Connect Wallet'; }
+    }
+  }
+
+  // ── Modal UI ──────────────────────────────────────────────────
   function _injectModal() {
     if (document.getElementById('pve-auth-modal')) return;
     const el = document.createElement('div');
     el.id = 'pve-auth-modal';
     el.innerHTML = `
 <style>
-#pve-auth-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:99998;display:flex;align-items:center;justify-content:center;padding:16px;backdrop-filter:blur(6px);}
-#pve-auth-box{background:#0e0e18;border:1px solid rgba(200,169,110,0.2);border-radius:16px;width:100%;max-width:340px;font-family:'DM Mono',monospace;overflow:hidden;}
+#pve-auth-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:99998;display:flex;align-items:center;justify-content:center;padding:16px;backdrop-filter:blur(6px);}
+#pve-auth-box{background:#0e0e18;border:1px solid rgba(200,169,110,0.25);border-radius:16px;width:100%;max-width:320px;font-family:'Cinzel',serif;overflow:hidden;}
 #pve-auth-box .ah{padding:28px 24px 20px;border-bottom:1px solid rgba(255,255,255,0.06);text-align:center;}
-#pve-auth-box .ah-logo{font-size:2.2rem;margin-bottom:10px;}
-#pve-auth-box .ah-title{font-size:0.85rem;letter-spacing:0.2em;text-transform:uppercase;color:#e8e6f0;margin-bottom:6px;}
-#pve-auth-box .ah-sub{font-size:0.6rem;color:#6b6880;letter-spacing:0.06em;line-height:1.7;}
-#pve-auth-box .abody{padding:22px 24px 26px;display:flex;flex-direction:column;gap:12px;}
-#pve-auth-box .abtn{font-family:'DM Mono',monospace;font-size:0.72rem;letter-spacing:0.1em;text-transform:uppercase;padding:14px;border-radius:10px;cursor:pointer;transition:all 0.2s;width:100%;display:flex;align-items:center;justify-content:center;gap:10px;}
-#pve-auth-box .abtn-primary{border:1px solid rgba(200,169,110,0.5);background:linear-gradient(135deg,rgba(200,169,110,0.12),rgba(200,169,110,0.06));color:#c8a96e;}
-#pve-auth-box .abtn-primary:hover:not(:disabled){background:linear-gradient(135deg,rgba(200,169,110,0.22),rgba(200,169,110,0.14));border-color:rgba(200,169,110,0.8);}
-#pve-auth-box .abtn:disabled{opacity:0.4;cursor:not-allowed;}
-#pve-auth-box .aerr{font-size:0.62rem;color:#e06c6c;min-height:14px;text-align:center;}
-#pve-auth-box .ainfo{font-size:0.56rem;color:#6b6880;line-height:1.7;text-align:center;}
-#pve-auth-box .awallets{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;}
-#pve-auth-box .awt{font-size:0.52rem;color:#3a3848;letter-spacing:0.06em;}
-.pve-spin{display:inline-block;animation:pveSpin 0.7s linear infinite;}
-@keyframes pveSpin{to{transform:rotate(360deg)}}
+#pve-auth-box .ah-logo{font-size:2.4rem;margin-bottom:10px;}
+#pve-auth-box .ah-title{font-size:0.9rem;letter-spacing:0.2em;text-transform:uppercase;color:#e8c96a;margin-bottom:6px;}
+#pve-auth-box .ah-sub{font-size:0.62rem;color:#6b6880;letter-spacing:0.05em;line-height:1.8;font-family:monospace;}
+#pve-auth-box .abody{padding:24px 24px 28px;display:flex;flex-direction:column;gap:12px;}
+#pve-auth-box .abtn{font-family:'Cinzel',serif;font-size:0.75rem;letter-spacing:0.12em;text-transform:uppercase;padding:14px;border-radius:8px;cursor:pointer;transition:all 0.2s;width:100%;display:flex;align-items:center;justify-content:center;gap:10px;border:1px solid rgba(200,169,110,0.5);background:linear-gradient(135deg,rgba(200,169,110,0.12),rgba(200,169,110,0.04));color:#c8a96e;}
+#pve-auth-box .abtn:hover:not(:disabled){background:linear-gradient(135deg,rgba(200,169,110,0.24),rgba(200,169,110,0.12));border-color:#c8a96e;color:#e8c96a;}
+#pve-auth-box .abtn:disabled{opacity:0.45;cursor:not-allowed;}
+#pve-auth-box .aerr{font-size:0.62rem;color:#e06c6c;min-height:16px;text-align:center;font-family:monospace;line-height:1.5;}
+#pve-auth-box .afoot{font-size:0.55rem;color:#3a3848;text-align:center;font-family:monospace;letter-spacing:0.05em;}
 </style>
 <div id="pve-auth-overlay">
   <div id="pve-auth-box">
     <div class="ah">
       <div class="ah-logo">⚔</div>
-      <div class="ah-title">PvE Hub</div>
-      <div class="ah-sub">Connect your wallet once to access<br>all apps — Iron Arena, Trade Together,<br>Reap What You Sow &amp; more</div>
+      <div class="ah-title">Iron Arena</div>
+      <div class="ah-sub">Connect your wallet to save progress<br>and claim $PvE rewards</div>
     </div>
     <div class="abody">
-      <button class="abtn abtn-primary" id="a-btn" onclick="PveAuth._openModal()">
+      <button class="abtn" id="a-btn" onclick="PveAuth._openModal()">
         <span>⬡</span> Connect Wallet
       </button>
       <div class="aerr" id="a-err"></div>
-      <div class="ainfo">MetaMask · Coinbase · Rainbow · Trust · WalletConnect<br>ETH · Optimism · Base · Polygon · Arbitrum + more</div>
-      <div class="awallets">
-        <span class="awt">🔒 Non-custodial — we never access your funds</span>
-      </div>
+      <div class="afoot">🔒 Non-custodial — we never access your funds</div>
     </div>
   </div>
 </div>`;
@@ -4238,29 +4177,7 @@ const PveAuth = (() => {
     if (el) el.remove();
   }
 
-  async function _openModal() {
-    const errEl = document.getElementById('a-err');
-    if (!_modal) {
-      if (errEl) errEl.textContent = 'Loading wallet modal…';
-      await _bootModal();
-    }
-    if (_modal) {
-      if (errEl) errEl.textContent = '';
-      _modal.open();
-      // Fallback poll
-      const { getAccount } = await import('https://esm.sh/@wagmi/core@2');
-      let tries = 0;
-      const iv = setInterval(async () => {
-        const acct = getAccount(_wagmiConfig);
-        if (acct?.address) { clearInterval(iv); await _handleAddress(acct.address); }
-        if (++tries > 30) clearInterval(iv);
-      }, 600);
-    } else {
-      if (errEl) errEl.textContent = 'Could not load wallet modal. Check your connection.';
-    }
-  }
-
-  // ── Nav chip ─────────────────────────────────────────────────
+  // ── Nav chip ──────────────────────────────────────────────────
   function _updateNavUser() {
     const nav = document.getElementById('site-nav');
     if (!nav) return;
@@ -4271,22 +4188,14 @@ const PveAuth = (() => {
       chip.style.cssText = 'font-size:0.6rem;letter-spacing:0.06em;color:#c8a96e;white-space:nowrap;flex-shrink:0;cursor:pointer;padding:4px 8px;border:1px solid rgba(200,169,110,0.2);border-radius:6px;transition:all 0.18s;';
       chip.onmouseenter = () => { chip.style.borderColor='rgba(200,169,110,0.5)';chip.style.color='#e8e6f0'; };
       chip.onmouseleave = () => { chip.style.borderColor='rgba(200,169,110,0.2)';chip.style.color='#c8a96e'; };
-      chip.onclick = () => {
-        if (confirm('Disconnect wallet?')) {
-          _profile = null; _save(null);
-          if (_modal) _modal.disconnect().catch(()=>{});
-          location.reload();
-        }
-      };
       nav.appendChild(chip);
     }
     if (_profile) {
       chip.textContent = (_profile.skin||'⚔') + ' ' + (_profile.displayName || _shortAddr(_profile.address));
-      chip.title = 'Connected: ' + (_profile.address||'') + '\nClick to disconnect';
+      chip.title = 'Connected: ' + (_profile.address||'') + '\nSwitch wallets in MetaMask, or click to disconnect';
       chip.onclick = () => {
-        if (confirm('Disconnect wallet?')) {
-          _profile = null; _save(null);
-          if (_modal) _modal.disconnect().catch(()=>{});
+        if (confirm('Disconnect wallet?\n\nYour progress is saved to Firebase and will restore when you reconnect.')) {
+          _profile = null; _save(null); _updateNavUser();
           location.reload();
         }
       };
@@ -4296,42 +4205,48 @@ const PveAuth = (() => {
     }
   }
 
+  async function _openModal() { _injectModal(); await _connect(); }
+
   // ── Public API ────────────────────────────────────────────────
-  async function init(appKey) {
+  async function init() {
     _profile = _load();
-    // Start booting Web3Modal in background immediately
-    _bootModal();
-    if (_profile && (_profile.address || _profile.uid)) {
-      const storageKey = _profile.address ? _profile.address.toLowerCase() : (_profile.uid || '');
+    // Listen for account switches in MetaMask immediately
+    _listenAccountChanges();
+    // If we have a cached profile, try to silently verify wallet is still connected
+    if (_profile && _profile.address) {
+      const storageKey = _profile.address.toLowerCase();
       if (typeof PveStorage !== 'undefined') PveStorage.install(storageKey);
+      const eth = _eth();
+      if (eth) {
+        try {
+          const accounts = await eth.request({ method: 'eth_accounts' }); // non-prompting check
+          if (accounts && accounts[0] && accounts[0].toLowerCase() === _profile.address.toLowerCase()) {
+            console.log('[PveAuth] Wallet silently reconnected:', _shortAddr(accounts[0]));
+          } else if (accounts && accounts[0]) {
+            // Different account active in MetaMask — update silently
+            await _handleAddress(accounts[0]);
+          }
+        } catch(e) { /* silent fail */ }
+      }
     }
     _updateNavUser();
     return _profile;
   }
 
-  function getProfile() { return _profile; }
-
-  async function saveProfile(p) {
-    _profile = { ..._profile, ...p };
-    _save(_profile);
-    _updateNavUser();
-  }
-
-  function logout() { _profile = null; _save(null); if (_modal) _modal.disconnect().catch(()=>{}); }
-
-  function onLogin(fn) { _onLoginListeners.push(fn); }
+  function getProfile()       { return _profile; }
+  async function saveProfile(p) { _profile = { ..._profile, ...p }; _save(_profile); _updateNavUser(); }
+  function logout()           { _profile = null; _save(null); _updateNavUser(); location.reload(); }
+  function onLogin(fn)        { _onLoginListeners.push(fn); }
 
   async function requireLogin() {
-    if (_profile && (_profile.uid || _profile.address)) return _profile;
+    if (_profile && _profile.address) return _profile;
     _injectModal();
-    // Ensure modal is booting
-    _bootModal();
     return new Promise(resolve => {
-      _onLoginCb = (p) => { _updateNavUser(); resolve(p); };
+      _onLoginCb = (p) => { resolve(p); };
     });
   }
 
-  return { init, getProfile, saveProfile, logout, requireLogin, onLogin, _connect: _openModal, _openModal, _shortAddr };
+  return { init, getProfile, saveProfile, logout, requireLogin, onLogin, _openModal, _shortAddr };
 })();
 window.PveAuth = PveAuth;
 
@@ -4415,9 +4330,7 @@ PveAuth.onLogin(async (profile) => {
   if (!newAddr) return;
 
   // If it's the same wallet that just re-authenticated, do nothing
-  const prevProfile = PveAuth.getProfile();
-  const currentAddr = (shopState.walletAddress || prevProfile?.address || '').toLowerCase();
-  // Only skip if addresses genuinely match AND we already have data loaded
+  const currentAddr = (shopState.walletAddress || '').toLowerCase();
   if (newAddr === currentAddr && state.totalXP > 0) return;
 
   showSaveToast('🔄 Wallet switched — loading save...', '#c9a84c');
@@ -4425,9 +4338,9 @@ PveAuth.onLogin(async (profile) => {
   // Save current wallet's progress before switching
   if (currentAddr) await saveGame().catch(() => {});
 
-  // Reset identity so getLbPlayerKey regenerates from new address
+  // Reset identity
   lbMyKey = null;
-  shopState.walletAddress = profile.address || profile.uid || '';
+  shopState.walletAddress = profile.address || '';
 
   // Reset in-memory state to defaults before loading new wallet's save
   Object.assign(state.skills,      { stamina:1, attack:1, defense:1, crit:1 });
@@ -4448,20 +4361,17 @@ PveAuth.onLogin(async (profile) => {
   if (heroNameInput) heroNameInput.value = '';
   const nameCostLabel = document.getElementById('name-cost-label');
   if (nameCostLabel) nameCostLabel.textContent = 'Free first name';
-  // Reset wave/enemy count DOM
   const waveNumEl = document.getElementById('wave-num');
   if (waveNumEl) waveNumEl.textContent = '1';
   const enemyCountEl = document.getElementById('enemy-count');
   if (enemyCountEl) enemyCountEl.textContent = '0';
   const fightBtn = document.getElementById('btn-fight');
   if (fightBtn) fightBtn.textContent = '⚔ ENTER THE ARENA';
-  // Reset player sprite to default
   const playerSprite = document.getElementById('player-sprite');
   if (playerSprite) playerSprite.textContent = '🧙';
 
   // Install PveStorage under new wallet address
-  const newStorageKey = (profile.address || '').toLowerCase() || profile.uid || '';
-  if (typeof PveStorage !== 'undefined') PveStorage.install(newStorageKey);
+  if (typeof PveStorage !== 'undefined') PveStorage.install(newAddr);
 
   // Load new wallet's cloud save
   const loaded = await loadGame().catch(() => false);
@@ -4481,7 +4391,6 @@ PveAuth.onLogin(async (profile) => {
     showSaveToast('✔ New wallet connected — fresh start!', '#27ae60');
   }
 
-  // Sync skin to new profile
   const _skinEmoji = SKINS[shopState.equippedSkin]?.emoji || '🧙';
   await PveAuth.saveProfile({ skin: _skinEmoji }).catch(() => {});
 });
