@@ -2977,9 +2977,9 @@ const GUILD_JOIN_WAVE   = 10;   // must have beaten wave 10 to join
 const GUILD_MAX_MEMBERS = 5;
 
 const guildState = {
-  myGuildCode:  localStorage.getItem('ironArena_guildCode')  || null,
-  myGuildName:  localStorage.getItem('ironArena_guildName')  || null,
-  isLeader:     localStorage.getItem('ironArena_guildLeader') === '1',
+  myGuildCode:  null,
+  myGuildName:  null,
+  isLeader:     false,
 };
 
 function generateGuildCode() {
@@ -2991,17 +2991,9 @@ function getHighestWaveBeaten() {
   return Math.max(0, state.wave - 1);
 }
 
-// ── Persist guild membership locally ──
+// Guild membership is persisted via saveGame() to Firebase — no localStorage needed
 function saveGuildLocally() {
-  if (guildState.myGuildCode) {
-    localStorage.setItem('ironArena_guildCode',   guildState.myGuildCode);
-    localStorage.setItem('ironArena_guildName',   guildState.myGuildName || '');
-    localStorage.setItem('ironArena_guildLeader', guildState.isLeader ? '1' : '0');
-  } else {
-    localStorage.removeItem('ironArena_guildCode');
-    localStorage.removeItem('ironArena_guildName');
-    localStorage.removeItem('ironArena_guildLeader');
-  }
+  // no-op: guild state is saved as part of the full saveGame() call
 }
 
 // ── Fetch a single guild record from shared storage ──
@@ -3414,29 +3406,21 @@ const LB_MAX     = 100;            // max entries to store globally
 let   lbCurrentTab = 'lifetime';
 let   lbMyKey = null;              // this player's storage key
 
-// Derive a stable player key — wallet address takes priority, fallback to random uid
+// Derive a stable player key — wallet address required
 function getLbPlayerKey() {
   if (lbMyKey) return lbMyKey;
-  // If wallet is connected via PveAuth, use it as the key
   const profile = (typeof PveAuth !== 'undefined') ? PveAuth.getProfile() : null;
   const walletAddr = profile?.address || shopState.walletAddress || '';
   if (walletAddr) {
     lbMyKey = LB_PREFIX + walletAddr.toLowerCase();
-    localStorage.setItem('ironArena_uid', walletAddr.toLowerCase());
     return lbMyKey;
   }
-  // Fallback: stored uid (random, pre-wallet)
-  let uid = localStorage.getItem('ironArena_uid');
-  if (!uid) {
-    uid = 'p_' + Math.random().toString(36).slice(2, 10);
-    localStorage.setItem('ironArena_uid', uid);
-  }
-  lbMyKey = LB_PREFIX + uid;
-  return lbMyKey;
+  return null; // no wallet = no leaderboard key
 }
 
 async function submitLeaderboardScore() {
   const key = getLbPlayerKey();
+  if (!key) return; // no wallet connected, skip leaderboard submit
   const name = shopState.heroName || 'Anonymous Warrior';
   const skin = SKINS[shopState.equippedSkin]?.emoji || '🧙';
   const totalSkillLv = SKILLS.reduce((s,k) => s + state.skills[k], 0);
@@ -3573,9 +3557,8 @@ function closeLeaderboard() {
 
 
 // ============================================================
-// SAVE / LOAD  (localStorage)
+// SAVE / LOAD — Firebase only, keyed to wallet address
 // ============================================================
-const SAVE_KEY = 'ironArena_v1'; // legacy fallback key
 
 async function _arenaStorageKey() {
   const p = PveAuth.getProfile();
@@ -3583,6 +3566,11 @@ async function _arenaStorageKey() {
 }
 
 async function saveGame() {
+  const key = await _arenaStorageKey();
+  if (!key || !window.storage) {
+    showSaveToast('⚠ Connect wallet to save', '#e74c3c');
+    return;
+  }
   const data = {
     skills:       state.skills,
     skillClicks:  state.skillClicks,
@@ -3609,12 +3597,7 @@ async function saveGame() {
     }
   };
   try {
-    const key = await _arenaStorageKey();
-    if (key && window.storage) {
-      await window.storage.set(key, JSON.stringify(data), false);
-    } else {
-      localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-    }
+    await window.storage.set(key, JSON.stringify(data), false);
     showSaveToast('✔ Progress saved!', '#27ae60');
     submitLeaderboardScore();
   } catch(e) {
@@ -3624,15 +3607,11 @@ async function saveGame() {
 
 async function loadGame() {
   try {
-    let raw = null;
     const key = await _arenaStorageKey();
-    if (key && window.storage) {
-      const r = await window.storage.get(key, false);
-      raw = r ? r.value : null;
-    }
-    if (!raw) raw = localStorage.getItem(SAVE_KEY); // fallback to localStorage
-    if (!raw) return false;
-    const data = JSON.parse(raw);
+    if (!key || !window.storage) return false;
+    const r = await window.storage.get(key, false);
+    if (!r) return false;
+    const data = JSON.parse(r.value);
 
     // Restore state
     Object.assign(state.skills,      data.skills      || {});
@@ -3705,13 +3684,8 @@ function deleteSave() {
   );
   if (!second) return;
 
-  localStorage.removeItem(SAVE_KEY);
-  localStorage.removeItem('ironArena_uid');
-  localStorage.removeItem('ironArena_guildCode');
-  // Also clear cloud save (fire-and-forget — no await needed in sync function)
+  // Delete cloud save
   try { _arenaStorageKey().then(key => { if (key && window.storage) window.storage.delete(key, false); }); } catch {}
-  localStorage.removeItem('ironArena_guildName');
-  localStorage.removeItem('ironArena_guildLeader');
 
   SKILLS.forEach(s => {
     state.skills[s]      = 1;
