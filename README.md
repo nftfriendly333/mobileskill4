@@ -4137,12 +4137,20 @@ const PveAuth = (() => {
       });
 
       // Listen for connect success
+      let _disconnectTimer = null;
       _modal.subscribeEvents(async (event) => {
         if (event.data.event === 'CONNECT_SUCCESS') {
+          // Cancel any pending disconnect — this is a switch, not a real logout
+          if (_disconnectTimer) { clearTimeout(_disconnectTimer); _disconnectTimer = null; }
           await _pollAccount(getAccount);
         }
         if (event.data.event === 'DISCONNECT_SUCCESS') {
-          _profile = null; _save(null); _updateNavUser();
+          // Delay wipe — if CONNECT_SUCCESS fires within 3s it's a wallet switch not a logout
+          _disconnectTimer = setTimeout(() => {
+            _disconnectTimer = null;
+            const acct = getAccount(_wagmiConfig);
+            if (!acct?.address) { _profile = null; _save(null); _updateNavUser(); }
+          }, 3000);
         }
       });
 
@@ -4291,6 +4299,13 @@ const PveAuth = (() => {
     if (_profile) {
       chip.textContent = (_profile.skin||'⚔') + ' ' + (_profile.displayName || _shortAddr(_profile.address));
       chip.title = 'Connected: ' + (_profile.address||'') + '\nClick to disconnect';
+      chip.onclick = () => {
+        if (confirm('Disconnect wallet?')) {
+          _profile = null; _save(null);
+          if (_modal) _modal.disconnect().catch(()=>{});
+          location.reload();
+        }
+      };
     } else {
       chip.textContent = '⬡ Connect';
       chip.onclick = () => _openModal();
